@@ -156,6 +156,36 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 curl -s -X POST http://localhost:8000/api/tasks/<TASK_ID>/quality-report
 ```
 
+### `GET /api/tasks/{task_id}/alto.xml` — ALTO 4.3 XML 导出
+
+对 **`status=done`** 的任务按阅读顺序导出 [ALTO 4.3](http://www.loc.gov/standards/alto/)
+XML（`Content-Type: application/xml`，输出通过官方 `alto-4-3.xsd` 校验）。
+文档严格按结果顺序稳定序列化：`TextBlock` 按 `blocks` 顺序、`TextLine` 按各块
+`line_ids` 引用的结果行顺序、行内 `String` 按结果词顺序展开。
+
+- `Page` 写入页面尺寸（`WIDTH` / `HEIGHT`），`PrintSpace` 覆盖整页；
+- `TextBlock` 的块类型（`column` / `zone`）通过 `Tags/LayoutTag` +
+  `TAGREFS` 表达（ALTO 的 `TextBlock` 没有 `TYPE` 属性）；
+- 每个词输出一个 `String`：`HPOS/VPOS/WIDTH/HEIGHT` 取**原始四角坐标的轴对齐
+  外接框**（不做去倾斜旋转），`CONTENT` 为词文本，有置信度时写 `WC`（0~1）；
+  相邻词之间存在正水平间距时补 `SP`；
+- 文本中的 `& < > " '` 等 XML 特殊字符均做实体转义，非法控制字符被剔除；
+- 导出**实时计算、不写库、不改写任务数据**，处理时间戳取任务完成时刻，
+  同一任务多次下载逐字节一致；无法归类的词框（`unclassified`）不进入版面树。
+
+错误沿用统一结构：任务不存在返回 `404`，任务未完成返回 `409`（同上）。
+
+```bash
+# 直接查看
+curl -s http://localhost:8000/api/tasks/<TASK_ID>/alto.xml
+
+# 下载为文件（响应带 Content-Disposition: attachment）
+curl -s -OJ http://localhost:8000/api/tasks/<TASK_ID>/alto.xml
+#   或显式指定文件名
+curl -s -o result.alto.xml \
+  http://localhost:8000/api/tasks/<TASK_ID>/alto.xml
+```
+
 ## 示例请求
 
 仓库内置一个带跨栏标题、左右双栏（含中文）、页码并整体倾斜 1.5° 的示例：
@@ -170,6 +200,9 @@ curl -s -X POST http://localhost:8000/api/tasks \
 
 # 2) 查询结果（把 <TASK_ID> 换成上一步返回的 ID）
 curl -s http://localhost:8000/api/tasks/<TASK_ID>
+
+# 3) 任务完成后下载 ALTO 4.3 XML
+curl -s -OJ http://localhost:8000/api/tasks/<TASK_ID>/alto.xml
 ```
 
 最小内联示例（双栏各两行）：
@@ -217,6 +250,8 @@ pytest -q
 测试覆盖：单栏顺序、双栏/三栏列优先顺序、跨栏标题、倾斜页面、行距不均、
 标题/页脚区域切分、行内基线排序、无法归类词框、CJK 文本拼接、
 质量报告四类异常规则（低置信/字号离群/重叠/间隙异常）及其确定性与只读性、
+ALTO 4.3 导出（页面尺寸/块/行/词的阅读顺序、原始四角外接框、置信度、
+特殊字符转义、确定性、404/409 错误结构）、
 HTTP 全流程（含 404/409 统一错误结构）。
 
 ## 项目结构
@@ -224,10 +259,12 @@ HTTP 全流程（含 404/409 统一错误结构）。
 ```
 app/
   main.py      FastAPI 入口（POST /api/tasks、GET /api/tasks/{id}、
-               POST /api/tasks/{id}/quality-report、/health）
+               POST /api/tasks/{id}/quality-report、
+               GET /api/tasks/{id}/alto.xml、/health）
   schemas.py   Pydantic 请求/响应模型与入参校验
   layout.py    版面几何算法（去倾斜 / 行聚类 / 基线排序 / XY-cut / 结果组装）
   quality.py   词框质量报告（中位数/MAD 稳健离群、重叠与间隙检测，确定性只读）
+  alto.py      ALTO 4.3 XML 导出（块/行/词按结果顺序序列化，确定性只读）
   worker.py    后台任务执行（线程池）
   db.py        SQLite 持久化（SQLAlchemy Core）
 examples/
