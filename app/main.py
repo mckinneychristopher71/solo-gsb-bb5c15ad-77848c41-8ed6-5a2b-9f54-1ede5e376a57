@@ -1,4 +1,4 @@
-"""FastAPI 入口：任务创建 / 结果查询。"""
+"""FastAPI 入口：任务创建 / 结果查询 / 质量报告 / ALTO 导出。"""
 from __future__ import annotations
 
 import json
@@ -7,8 +7,10 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.responses import Response
 
 from . import db
+from .alto import build_alto_xml
 from .quality import build_quality_report
 from .schemas import QualityReport, SortRequest, TaskCreated, TaskStatus
 from .worker import process_task
@@ -94,3 +96,33 @@ def quality_report(task_id: str) -> Dict[str, Any]:
     result = json.loads(row["result_json"])
     report = build_quality_report(request_payload, result)
     return {"task_id": task_id, **report}
+
+
+@app.get("/api/tasks/{task_id}/alto.xml")
+def export_alto(task_id: str) -> Response:
+    """把已完成任务的排序结果导出为 ALTO 4.3 XML 文档（只读）。
+
+    页面尺寸、文本块、行与词按结果阅读顺序序列化；词节点保留原始四角
+    坐标多边形、外接框、文本与置信度。不写库、不改写任务结果；同一任务
+    多次导出逐字节一致。任务不存在返回 404，任务尚未完成
+    （pending/processing/failed）返回 409。
+    """
+    row = db.get_task(task_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if row["status"] != "done":
+        raise HTTPException(
+            status_code=409,
+            detail=f"task not finished: status={row['status']}",
+        )
+    request_payload = json.loads(row["request_json"])
+    result = json.loads(row["result_json"])
+    xml = build_alto_xml(request_payload, result)
+    return Response(
+        content=xml,
+        media_type="application/alto+xml",
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="{task_id}.alto.xml"',
+        },
+    )

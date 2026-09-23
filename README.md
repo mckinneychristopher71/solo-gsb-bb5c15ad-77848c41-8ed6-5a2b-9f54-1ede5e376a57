@@ -44,6 +44,10 @@ curl http://localhost:8000/health
 报告按请求实时计算，无需额外环境变量、数据库迁移或卷；历史任务只要在
 `/data/ocr_sort.db` 中处于 `done` 状态即可直接生成报告。
 
+镜像同样内置 ALTO 4.3 导出接口（`GET /api/tasks/{task_id}/alto.xml`），
+XML 仅由 Python 标准库生成，不引入新的镜像层、依赖或环境变量；
+历史 `done` 任务可直接导出下载。
+
 停止：
 
 ```bash
@@ -156,6 +160,34 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 curl -s -X POST http://localhost:8000/api/tasks/<TASK_ID>/quality-report
 ```
 
+### `GET /api/tasks/{task_id}/alto.xml` — ALTO XML 导出
+
+对 **`status=done`** 的任务导出 [ALTO 4.3](https://www.loc.gov/standards/alto/)
+文档（`application/alto+xml`，只读、实时生成、不写库、不改写任务结果）：
+
+- 页面尺寸写入 `Layout/Page` 的 `WIDTH`/`HEIGHT`，`MeasurementUnit` 为 `pixel`；
+- 文本块 `TextBlock`、文本行 `TextLine`、词 `String` 严格按结果**阅读顺序**
+  序列化，同一任务多次导出**逐字节一致**；
+- 每个 `String` 保留**原始四角坐标**：`Shape/Polygon` 的 `POINTS` 为四个角点
+  （ALTO 4 的空格分隔 `x y` 浮点序列），`HPOS`/`VPOS`/`WIDTH`/`HEIGHT`
+  为其外接框；文本在 `CONTENT`（XML 特殊字符自动转义），置信度在 `WC`
+  （提交时未提供置信度的词不输出 `WC`）；
+- 未归行的词框（`unclassified`）不进入 ALTO 文档。
+
+错误沿用统一结构：任务不存在返回 `404 {"detail": "task not found"}`；
+任务未完成（`pending` / `processing` / `failed`）返回
+`409 {"detail": "task not finished: status=<status>"}`。
+
+下载示例（响应带 `Content-Disposition: attachment`，可直接落盘）：
+
+```bash
+# 按响应头文件名保存为 <TASK_ID>.alto.xml
+curl -s -OJ http://localhost:8000/api/tasks/<TASK_ID>/alto.xml
+
+# 或显式指定输出文件
+curl -s http://localhost:8000/api/tasks/<TASK_ID>/alto.xml -o page.alto.xml
+```
+
 ## 示例请求
 
 仓库内置一个带跨栏标题、左右双栏（含中文）、页码并整体倾斜 1.5° 的示例：
@@ -170,6 +202,9 @@ curl -s -X POST http://localhost:8000/api/tasks \
 
 # 2) 查询结果（把 <TASK_ID> 换成上一步返回的 ID）
 curl -s http://localhost:8000/api/tasks/<TASK_ID>
+
+# 3) 下载 ALTO XML（可选，保存为 <TASK_ID>.alto.xml）
+curl -s -OJ http://localhost:8000/api/tasks/<TASK_ID>/alto.xml
 ```
 
 最小内联示例（双栏各两行）：
@@ -217,6 +252,7 @@ pytest -q
 测试覆盖：单栏顺序、双栏/三栏列优先顺序、跨栏标题、倾斜页面、行距不均、
 标题/页脚区域切分、行内基线排序、无法归类词框、CJK 文本拼接、
 质量报告四类异常规则（低置信/字号离群/重叠/间隙异常）及其确定性与只读性、
+ALTO 导出（文档结构/阅读顺序/词框几何与置信度/XML 转义/字节稳定/只读）、
 HTTP 全流程（含 404/409 统一错误结构）。
 
 ## 项目结构
@@ -224,10 +260,12 @@ HTTP 全流程（含 404/409 统一错误结构）。
 ```
 app/
   main.py      FastAPI 入口（POST /api/tasks、GET /api/tasks/{id}、
-               POST /api/tasks/{id}/quality-report、/health）
+               POST /api/tasks/{id}/quality-report、
+               GET /api/tasks/{id}/alto.xml、/health）
   schemas.py   Pydantic 请求/响应模型与入参校验
   layout.py    版面几何算法（去倾斜 / 行聚类 / 基线排序 / XY-cut / 结果组装）
   quality.py   词框质量报告（中位数/MAD 稳健离群、重叠与间隙检测，确定性只读）
+  alto.py      ALTO 4.3 XML 导出（按阅读顺序确定性序列化，只读）
   worker.py    后台任务执行（线程池）
   db.py        SQLite 持久化（SQLAlchemy Core）
 examples/
